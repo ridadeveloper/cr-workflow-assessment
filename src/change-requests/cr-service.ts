@@ -46,13 +46,35 @@ export class CrService {
 	sendForApproval(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: move SUBMITTED -> PENDING_APPROVAL, and decide single-approver vs committee
 		//       routing based on |delta| and COMMITTEE_DELTA_THRESHOLD.
-		throw Errors.validation('sendForApproval not implemented');
+		const cr = this.recomputeTotals(user, id);
+		const needCommittee =Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD;
+		//first state should be PENDING_APPROVAL
+		this.transition(cr, CrStatus.PENDING_APPROVAL, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		this.repo.save(cr);
+		//second state should be COMMITTEE_VOTING  based on delta 
+		if (needCommittee) {
+			cr.committee = {
+				members: this.committeeConfig?.members ?? [],
+				head: this.committeeConfig?.head ?? '',
+				votes: []
+			};
+			this.transition(cr, CrStatus.COMMITTEE_VOTING, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		} else {
+			//no need to transition to APPROVED if delta is less than COMMITTEE_DELTA_THRESHOLD
+			//this.transition(cr, CrStatus.APPROVED, CrAction.SEND_FOR_APPROVAL, user.id, at);
+		}
+		return this.repo.save(cr);
 	}
 
 	approve(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: permission check (cr_a_*); legal transition; record approval + audit.
 		//       Committee CRs approve only via committee resolution.
-		throw Errors.validation('approve not implemented');
+	const cr = this.getOrThrow(user, id);
+	if (cr.status === CrStatus.COMMITTEE_VOTING || cr.status === CrStatus.COMMITTEE_DECISION) {
+		throw Errors.validation('Committee CRs approve only via committee resolution');
+	}
+	this.transition(cr, CrStatus.APPROVED, CrAction.APPROVE, user.id, at);
+	return this.repo.save(cr);
 	}
 
 	castVote(user: ReqUser, id: string, decision: 'APPROVE' | 'REJECT', at: string): ChangeRequest {
@@ -67,7 +89,12 @@ export class CrService {
 
 	reject(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: legal transition to REJECTED (terminal); budget untouched; audit.
-		throw Errors.validation('reject not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (cr.status === CrStatus.COMMITTEE_VOTING || cr.status === CrStatus.COMMITTEE_DECISION) {
+			throw Errors.validation('Committee CRs reject only via committee resolution');
+		}
+		this.transition(cr, CrStatus.REJECTED, CrAction.REJECT, user.id, at);
+		return this.repo.save(cr);
 	}
 
 	apply(user: ReqUser, id: string, at: string): ChangeRequest {
