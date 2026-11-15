@@ -82,7 +82,18 @@ export class CrService {
 
 	returnToDraft(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: PENDING_APPROVAL -> RETURNED -> editable as DRAFT; reset approval progress.
-		throw Errors.validation('return not implemented');
+		const cr = this.getOrThrow(user, id);
+		if (cr.status !== CrStatus.PENDING_APPROVAL) {
+			throw Errors.validation('Change request is not in pending approval');
+		}
+		this.transition(cr, CrStatus.RETURNED, CrAction.RETURN, user.id, at);
+		this.transition(cr, CrStatus.DRAFT, CrAction.RETURN, user.id, at);
+		cr.approvals = [];
+		if (cr.committee) {
+			cr.committee.votes = [];
+			cr.committee.resolvedAt = undefined;
+		}
+		return this.repo.save(cr);
 	}
 
 	reject(user: ReqUser, id: string, at: string): ChangeRequest {
@@ -99,7 +110,11 @@ export class CrService {
 		// TODO: require APPROVED + cr_x_* policy; check budget.balance covers a positive delta else
 		//       INSUFFICIENT_BUDGET; update budget, set APPLIED, audit. Recompute totals from the
 		//       agreement.
-		throw Errors.validation('apply not implemented');
+		
+	const cr = this.recomputeTotals(user, id);
+	if (cr.status !== CrStatus.APPROVED) {
+		throw Errors.validation('Change request is not approved');
+	}
 	const agreement = this.agreements.get(cr.agreementId);
 	const budget = this.budgets.get(agreement.budgetId);
 	if (!budget) throw Errors.notFound('Budget not found');
