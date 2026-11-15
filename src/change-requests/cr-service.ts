@@ -5,6 +5,7 @@ import { assertTransition } from './cr-state-machine';
 import { computeTotals } from './cr-totals';
 import { Errors } from '../common/errors';
 import { ReqUser, hasPolicy } from '../common/policy';
+import { round2 } from '../common/money.util';
 
 /**
  * Orchestrates CR actions. The transition + audit helper is provided; the action methods are
@@ -59,10 +60,7 @@ export class CrService {
 				votes: []
 			};
 			this.transition(cr, CrStatus.COMMITTEE_VOTING, CrAction.SEND_FOR_APPROVAL, user.id, at);
-		} else {
-			//no need to transition to APPROVED if delta is less than COMMITTEE_DELTA_THRESHOLD
-			//this.transition(cr, CrStatus.APPROVED, CrAction.SEND_FOR_APPROVAL, user.id, at);
-		}
+		} 
 		return this.repo.save(cr);
 	}
 
@@ -102,6 +100,19 @@ export class CrService {
 		//       INSUFFICIENT_BUDGET; update budget, set APPLIED, audit. Recompute totals from the
 		//       agreement.
 		throw Errors.validation('apply not implemented');
+	const agreement = this.agreements.get(cr.agreementId);
+	const budget = this.budgets.get(agreement.budgetId);
+	if (!budget) throw Errors.notFound('Budget not found');
+	const delta = cr.totals.delta;
+	if (delta > 0 && budget.balance < delta) {
+		throw Errors.insufficientBudget();
+	}
+	this.transition(cr, CrStatus.APPLIED, CrAction.APPLY, user.id, at);
+	if (delta !== 0) {
+		budget.booked = round2(budget.booked + delta);
+		budget.balance = round2(budget.balance - delta);
+	}
+	return this.repo.save(cr);
 	}
 
 	/** Read a single CR. */
