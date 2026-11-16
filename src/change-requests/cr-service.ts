@@ -44,23 +44,31 @@ export class CrService {
 		return this.repo.save(cr);
 	}
 
+	cancel(user: ReqUser, id: string, at: string): ChangeRequest {
+		const cr = this.getOrThrow(user, id);
+		this.transition(cr, CrStatus.CANCELLED, CrAction.CANCEL, user.id, at);
+		return this.repo.save(cr);
+	}
+
 	sendForApproval(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: move SUBMITTED -> PENDING_APPROVAL, and decide single-approver vs committee
 		//       routing based on |delta| and COMMITTEE_DELTA_THRESHOLD.
-		const cr = this.recomputeTotals(user, id);
-		const needCommittee =Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD;
-		//first state should be PENDING_APPROVAL
+		const cr = this.getOrThrow(user, id);
+		const agreement = this.agreements.get(cr.agreementId);
+		if (!agreement) throw Errors.notFound('Agreement not found');
+		const totals = computeTotals(agreement, cr);
+		const needCommittee = Math.abs(totals.delta) > COMMITTEE_DELTA_THRESHOLD;
+		const members = this.committeeConfig?.members ?? [];
+		const head = this.committeeConfig?.head ?? '';
+		if (needCommittee && (members.length === 0 || !head)) {
+			throw Errors.validation('Committee is not configured');
+		}
 		this.transition(cr, CrStatus.PENDING_APPROVAL, CrAction.SEND_FOR_APPROVAL, user.id, at);
-		this.repo.save(cr);
-		//second state should be COMMITTEE_VOTING  based on delta 
+		cr.totals = totals;
 		if (needCommittee) {
-			cr.committee = {
-				members: this.committeeConfig?.members ?? [],
-				head: this.committeeConfig?.head ?? '',
-				votes: []
-			};
+			cr.committee = { members, head, votes: [] };
 			this.transition(cr, CrStatus.COMMITTEE_VOTING, CrAction.SEND_FOR_APPROVAL, user.id, at);
-		} 
+		}
 		return this.repo.save(cr);
 	}
 
@@ -77,7 +85,31 @@ export class CrService {
 
 	castVote(user: ReqUser, id: string, decision: 'APPROVE' | 'REJECT', at: string): ChangeRequest {
 		// TODO: only committee members may vote; resolve on majority + head decision.
-		throw Errors.validation('castVote not implemented');
+		const cr = this.getOrThrow(user, id);
+		const committee = cr.committee;
+		if (cr.status !== CrStatus.COMMITTEE_VOTING || !committee) {
+			throw Errors.validation('Change request is not in committee voting');
+		}
+		if (!committee.members.includes(user.id)) {
+			throw Errors.forbidden('Only committee members may vote');
+		}
+		if (committee.votes.some((vote) => vote.userId === user.id)) {
+			throw Errors.validation('Member has already voted');
+		}
+		committee.votes.push({ userId: user.id, decision, at });
+		cr.audit = [...cr.audit, { action: CrAction.CAST_VOTE, byUserId: user.id, at }];
+		const approveCount = committee.votes.filter((vote) => vote.decision === 'APPROVE').length;
+		const headApproved = committee.votes.some((vote) => vote.userId === committee.head && vote.decision === 'APPROVE');
+		if (approveCount > committee.members.length / 2 && headApproved) {
+			this.transition(cr, CrStatus.COMMITTEE_DECISION, CrAction.RESOLVE_COMMITTEE, user.id, at);
+			this.transition(cr, CrStatus.APPROVED, CrAction.RESOLVE_COMMITTEE, user.id, at);
+			committee.resolvedAt = at;
+		} else if (committee.votes.length === committee.members.length) {
+			this.transition(cr, CrStatus.COMMITTEE_DECISION, CrAction.RESOLVE_COMMITTEE, user.id, at);
+			this.transition(cr, CrStatus.REJECTED, CrAction.RESOLVE_COMMITTEE, user.id, at);
+			committee.resolvedAt = at;
+		}
+		return this.repo.save(cr);
 	}
 
 	returnToDraft(user: ReqUser, id: string, at: string): ChangeRequest {
