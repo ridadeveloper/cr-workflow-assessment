@@ -107,7 +107,7 @@ describe('seed data', () => {
 		expect(budgets.get('BUD-LOW')).toMatchObject({ balance: 100, booked: 0 });
 	});
 
-	it('approves and applies the seeded large pending request for 4000', () => {
+	it('refuses a single approval of the seeded large pending request for 4000', () => {
 		const { service, budgets } = freshService();
 		const { alice, mona } = buildSeed().users;
 		const pending = service.get(alice, 'CR-PENDING-LARGE');
@@ -120,14 +120,15 @@ describe('seed data', () => {
 			delta: 4000,
 		});
 
-		expect(service.approve(mona, 'CR-PENDING-LARGE', at.approve).status).toBe(CrStatus.APPROVED);
-		expect(service.apply(mona, 'CR-PENDING-LARGE', at.apply).status).toBe(CrStatus.APPLIED);
-		expect(budgets.get('BUD-1')).toMatchObject({ booked: 12000, balance: 6000 });
+		expectBusinessError(() => service.approve(mona, 'CR-PENDING-LARGE', at.approve), 'VALIDATION');
+
+		expect(service.get(alice, 'CR-PENDING-LARGE').status).toBe(CrStatus.PENDING_APPROVAL);
+		expect(budgets.get('BUD-1')).toMatchObject({ booked: 8000, balance: 10000 });
 	});
 
 	it('leaves the seeded applied request and BUD-1 unchanged', () => {
 		const { service, budgets } = freshService();
-		const { alice } = buildSeed().users;
+		const { alice, mona } = buildSeed().users;
 		const applied = service.get(alice, 'CR-APPLIED');
 
 		expect(applied.status).toBe(CrStatus.APPLIED);
@@ -135,8 +136,8 @@ describe('seed data', () => {
 		expect(applied.approvals).toEqual([{ userId: 'mona', action: 'APPROVE', at: '2026-01-01T00:00:00.000Z' }]);
 
 		expectBusinessError(() => service.submit(alice, 'CR-APPLIED', at.submit), 'TERMINAL_STATE');
-		expectBusinessError(() => service.approve(alice, 'CR-APPLIED', at.approve), 'TERMINAL_STATE');
-		expectBusinessError(() => service.cancel(alice, 'CR-APPLIED', at.apply), 'TERMINAL_STATE');
+		expectBusinessError(() => service.approve(mona, 'CR-APPLIED', at.approve), 'TERMINAL_STATE');
+		expectBusinessError(() => service.cancel(mona, 'CR-APPLIED', at.apply), 'TERMINAL_STATE');
 
 		expect(service.get(alice, 'CR-APPLIED').status).toBe(CrStatus.APPLIED);
 		expect(budgets.get('BUD-1')).toMatchObject({ booked: 8000, balance: 10000 });

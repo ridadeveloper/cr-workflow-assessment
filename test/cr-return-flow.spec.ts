@@ -6,15 +6,11 @@ import { BusinessError } from '../src/common/errors';
 import { buildSeed } from '../src/seed';
 
 /**
- * First workflow case, without permission checks.
- * Permissions are not part of this case: the actions are exercised as the service
- * implements them today, using org-alpha values from seed.ts.
- *
  * Happy path: DRAFT → SUBMITTED → PENDING_APPROVAL → RETURNED → DRAFT.
- * `returnToDraft` records the RETURNED stop, then moves the request back to DRAFT
- * and clears approval progress so it can be submitted again.
+ * Alice submits. Mona returns, because return and approve require cr_a_*.
+ * A separate block checks that a user without cr_a_* is refused before the status changes.
  */
-describe('CR return flow (no permission checks)', () => {
+describe('CR return flow', () => {
 	const at = {
 		submit: '2026-03-01T09:00:00.000Z',
 		send: '2026-03-01T10:00:00.000Z',
@@ -43,7 +39,7 @@ describe('CR return flow (no permission checks)', () => {
 	describe('happy path: draft, submitted, pending approval, returned, then draft', () => {
 		it('walks CR-DRAFT through submission, pending approval, return, and back to draft', () => {
 			const service = freshService();
-			const { alice } = buildSeed().users;
+			const { alice, mona } = buildSeed().users;
 
 			const submitted = service.submit(alice, 'CR-DRAFT', at.submit);
 			expect(submitted.status).toBe(CrStatus.SUBMITTED);
@@ -53,14 +49,14 @@ describe('CR return flow (no permission checks)', () => {
 			expect(pending.status).toBe(CrStatus.PENDING_APPROVAL);
 			expect(pending.committee).toBeUndefined();
 
-			const returned = service.returnToDraft(alice, 'CR-DRAFT', at.returned);
+			const returned = service.returnToDraft(mona, 'CR-DRAFT', at.returned);
 			expect(returned.status).toBe(CrStatus.DRAFT);
 			expect(returned.approvals).toEqual([]);
 			expect(returned.audit).toEqual([
 				{ action: CrAction.SUBMIT, byUserId: 'alice', at: at.submit },
 				{ action: CrAction.SEND_FOR_APPROVAL, byUserId: 'alice', at: at.send },
-				{ action: CrAction.RETURN, byUserId: 'alice', at: at.returned },
-				{ action: CrAction.RETURN, byUserId: 'alice', at: at.returned },
+				{ action: CrAction.RETURN, byUserId: 'mona', at: at.returned },
+				{ action: CrAction.RETURN, byUserId: 'mona', at: at.returned },
 			]);
 
 			const resubmitted = service.submit(alice, 'CR-DRAFT', at.resubmit);
@@ -79,19 +75,19 @@ describe('CR return flow (no permission checks)', () => {
 
 		it('rejects returning a change request that is still draft', () => {
 			const service = freshService();
-			const { alice } = buildSeed().users;
+			const { alice, mona } = buildSeed().users;
 
-			expectBusinessError(() => service.returnToDraft(alice, 'CR-DRAFT', at.returned), 'VALIDATION');
+			expectBusinessError(() => service.returnToDraft(mona, 'CR-DRAFT', at.returned), 'VALIDATION');
 			expect(service.get(alice, 'CR-DRAFT').status).toBe(CrStatus.DRAFT);
 		});
 
 		it('rejects returning a change request that has only been submitted', () => {
 			const service = freshService();
-			const { alice } = buildSeed().users;
+			const { alice, mona } = buildSeed().users;
 
 			service.submit(alice, 'CR-DRAFT', at.submit);
 
-			expectBusinessError(() => service.returnToDraft(alice, 'CR-DRAFT', at.returned), 'VALIDATION');
+			expectBusinessError(() => service.returnToDraft(mona, 'CR-DRAFT', at.returned), 'VALIDATION');
 			expect(service.get(alice, 'CR-DRAFT').status).toBe(CrStatus.SUBMITTED);
 		});
 
@@ -102,14 +98,14 @@ describe('CR return flow (no permission checks)', () => {
 
 		it('does not move an approved or applied change request backward when it is returned', () => {
 			const service = freshService();
-			const { alice } = buildSeed().users;
+			const { alice, mona } = buildSeed().users;
 
-			const approved = service.approve(alice, 'CR-PENDING-SMALL', '2026-03-01T10:30:00.000Z');
+			const approved = service.approve(mona, 'CR-PENDING-SMALL', '2026-03-01T10:30:00.000Z');
 			expect(approved.status).toBe(CrStatus.APPROVED);
 			const approvedAudit = [...approved.audit];
 			const approvedApprovals = [...approved.approvals];
 
-			expectBusinessError(() => service.returnToDraft(alice, 'CR-PENDING-SMALL', at.returned), 'VALIDATION');
+			expectBusinessError(() => service.returnToDraft(mona, 'CR-PENDING-SMALL', at.returned), 'VALIDATION');
 			const approvedAfter = service.get(alice, 'CR-PENDING-SMALL');
 			expect(approvedAfter.status).toBe(CrStatus.APPROVED);
 			expect(approvedAfter.audit).toEqual(approvedAudit);
@@ -120,7 +116,7 @@ describe('CR return flow (no permission checks)', () => {
 			const appliedAudit = [...applied.audit];
 			const appliedApprovals = [...applied.approvals];
 
-			expectBusinessError(() => service.returnToDraft(alice, 'CR-APPLIED', at.returned), 'VALIDATION');
+			expectBusinessError(() => service.returnToDraft(mona, 'CR-APPLIED', at.returned), 'VALIDATION');
 			const appliedAfter = service.get(alice, 'CR-APPLIED');
 			expect(appliedAfter.status).toBe(CrStatus.APPLIED);
 			expect(appliedAfter.audit).toEqual(appliedAudit);
@@ -129,15 +125,34 @@ describe('CR return flow (no permission checks)', () => {
 
 		it('rejects a second return once the request is already back in draft', () => {
 			const service = freshService();
-			const { alice } = buildSeed().users;
+			const { alice, mona } = buildSeed().users;
 
 			service.submit(alice, 'CR-DRAFT', at.submit);
 			service.sendForApproval(alice, 'CR-DRAFT', at.send);
-			const draft = service.returnToDraft(alice, 'CR-DRAFT', at.returned);
+			const draft = service.returnToDraft(mona, 'CR-DRAFT', at.returned);
 			expect(draft.status).toBe(CrStatus.DRAFT);
 
-			expectBusinessError(() => service.returnToDraft(alice, 'CR-DRAFT', '2026-03-01T13:00:00.000Z'), 'VALIDATION');
+			expectBusinessError(() => service.returnToDraft(mona, 'CR-DRAFT', '2026-03-01T13:00:00.000Z'), 'VALIDATION');
 			expect(service.get(alice, 'CR-DRAFT').status).toBe(CrStatus.DRAFT);
+		});
+	});
+
+	describe('permissions', () => {
+		it('refuses return and approve when the user has no approve permission', () => {
+			const service = freshService();
+			const { alice, mona } = buildSeed().users;
+
+			service.submit(alice, 'CR-DRAFT', at.submit);
+			service.sendForApproval(alice, 'CR-DRAFT', at.send);
+
+			expectBusinessError(() => service.returnToDraft(alice, 'CR-DRAFT', at.returned), 'FORBIDDEN');
+			expect(service.get(alice, 'CR-DRAFT').status).toBe(CrStatus.PENDING_APPROVAL);
+
+			expectBusinessError(() => service.approve(alice, 'CR-PENDING-SMALL', at.returned), 'FORBIDDEN');
+			expect(service.get(alice, 'CR-PENDING-SMALL').status).toBe(CrStatus.PENDING_APPROVAL);
+
+			const returned = service.returnToDraft(mona, 'CR-DRAFT', at.returned);
+			expect(returned.status).toBe(CrStatus.DRAFT);
 		});
 	});
 });

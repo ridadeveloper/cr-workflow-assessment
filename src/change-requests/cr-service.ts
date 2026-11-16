@@ -4,7 +4,7 @@ import { CrStatus, CrAction } from './cr.enums';
 import { assertTransition } from './cr-state-machine';
 import { computeTotals } from './cr-totals';
 import { Errors } from '../common/errors';
-import { ReqUser, hasPolicy } from '../common/policy';
+import { ReqUser, hasPolicy,crReadScope } from '../common/policy';
 import { round2 } from '../common/money.util';
 
 /**
@@ -39,12 +39,13 @@ export class CrService {
 
 	submit(user: ReqUser, id: string, at: string): ChangeRequest {
 		const cr = this.getOrThrow(user, id);
-		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o')) throw Errors.forbidden('Cannot submit');
+		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o') && !hasPolicy(user, 'cr_u_w')) throw Errors.forbidden('Cannot submit');
 		this.transition(cr, CrStatus.SUBMITTED, CrAction.SUBMIT, user.id, at);
 		return this.repo.save(cr);
 	}
 
 	cancel(user: ReqUser, id: string, at: string): ChangeRequest {
+		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o') && !hasPolicy(user, 'cr_a_w')) throw Errors.forbidden('Cannot cancel');
 		const cr = this.getOrThrow(user, id);
 		this.transition(cr, CrStatus.CANCELLED, CrAction.CANCEL, user.id, at);
 		return this.repo.save(cr);
@@ -53,6 +54,7 @@ export class CrService {
 	sendForApproval(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: move SUBMITTED -> PENDING_APPROVAL, and decide single-approver vs committee
 		//       routing based on |delta| and COMMITTEE_DELTA_THRESHOLD.
+		if (!hasPolicy(user, 'cr_u_u') && !hasPolicy(user, 'cr_u_o') && !hasPolicy(user, 'cr_u_w')) throw Errors.forbidden('Cannot send for approval');
 		const cr = this.getOrThrow(user, id);
 		const agreement = this.agreements.get(cr.agreementId);
 		if (!agreement) throw Errors.notFound('Agreement not found');
@@ -75,9 +77,13 @@ export class CrService {
 	approve(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: permission check (cr_a_*); legal transition; record approval + audit.
 		//       Committee CRs approve only via committee resolution.
+	if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o') && !hasPolicy(user, 'cr_a_w')) throw Errors.forbidden('Cannot approve');
 	const cr = this.getOrThrow(user, id);
 	if (cr.status === CrStatus.COMMITTEE_VOTING || cr.status === CrStatus.COMMITTEE_DECISION) {
 		throw Errors.validation('Committee CRs approve only via committee resolution');
+	}
+	if (Math.abs(cr.totals.delta) > COMMITTEE_DELTA_THRESHOLD) {
+		throw Errors.validation('Large changes must be resolved by the committee');
 	}
 	this.transition(cr, CrStatus.APPROVED, CrAction.APPROVE, user.id, at);
 	return this.repo.save(cr);
@@ -114,6 +120,7 @@ export class CrService {
 
 	returnToDraft(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: PENDING_APPROVAL -> RETURNED -> editable as DRAFT; reset approval progress.
+		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o') && !hasPolicy(user, 'cr_a_w')) throw Errors.forbidden('Cannot return to draft');
 		const cr = this.getOrThrow(user, id);
 		if (cr.status !== CrStatus.PENDING_APPROVAL) {
 			throw Errors.validation('Change request is not in pending approval');
@@ -130,6 +137,7 @@ export class CrService {
 
 	reject(user: ReqUser, id: string, at: string): ChangeRequest {
 		// TODO: legal transition to REJECTED (terminal); budget untouched; audit.
+		if (!hasPolicy(user, 'cr_a_u') && !hasPolicy(user, 'cr_a_o') && !hasPolicy(user, 'cr_a_w')) throw Errors.forbidden('Cannot reject');
 		const cr = this.getOrThrow(user, id);
 		if (cr.status === CrStatus.COMMITTEE_VOTING || cr.status === CrStatus.COMMITTEE_DECISION) {
 			throw Errors.validation('Committee CRs reject only via committee resolution');
@@ -142,7 +150,7 @@ export class CrService {
 		// TODO: require APPROVED + cr_x_* policy; check budget.balance covers a positive delta else
 		//       INSUFFICIENT_BUDGET; update budget, set APPLIED, audit. Recompute totals from the
 		//       agreement.
-		
+   	if (!hasPolicy(user, 'cr_x_u') && !hasPolicy(user, 'cr_x_o') && !hasPolicy(user, 'cr_x_w')) throw Errors.forbidden('Cannot apply');
 	const cr = this.recomputeTotals(user, id);
 	if (cr.status !== CrStatus.APPROVED) {
 		throw Errors.validation('Change request is not approved');
@@ -170,8 +178,13 @@ export class CrService {
 	/** List the CRs this user is allowed to see. Honor the user's read scope (u/w/o). */
 	list(user: ReqUser): ChangeRequest[] {
 		// TODO: org scoping happens in the repo; narrow further by the caller's read scope.
-		return this.repo.list(user);
-	}
+		const scope = crReadScope(user);
+		if (!scope) throw Errors.forbidden('Cannot list');
+		const inOrg = this.repo.list(user);
+		if (scope === 'o') return inOrg;
+		if (scope === 'w') return inOrg.filter((cr) => user.workspaceIds.includes(cr.workspaceId));
+		return inOrg.filter((cr) => cr.createdBy === user.id);
+		}
 
 	/** Recompute and persist totals for a CR (used by tests and before routing). Provided. */
 	recomputeTotals(user: ReqUser, id: string): ChangeRequest {

@@ -6,13 +6,14 @@ import { BusinessError } from '../src/common/errors';
 import { buildSeed } from '../src/seed';
 
 /**
- * Cancelling a draft. Permissions are not part of this case.
+ * Cancelling a draft.
  * Data: seed.ts, org-alpha, CR-DRAFT, user alice.
  *
  * DRAFT → CANCELLED is terminal. Later actions leave the status and the audit unchanged.
  * RETURNED, APPLIED, and COMMITTEE_DECISION cannot be cancelled.
+ * A separate case checks update permission before cancel and approve permission before return.
  */
-describe('CR cancel flow (no permission checks)', () => {
+describe('CR cancel flow', () => {
 	const at = {
 		cancel: '2026-03-02T09:00:00.000Z',
 		later: '2026-03-02T10:00:00.000Z',
@@ -38,28 +39,43 @@ describe('CR cancel flow (no permission checks)', () => {
 
 	it('cancels a draft and refuses every later transition', () => {
 		const service = freshService();
-		const { alice } = buildSeed().users;
+		const { mona } = buildSeed().users;
 
-		const cancelled = service.cancel(alice, 'CR-DRAFT', at.cancel);
+		const cancelled = service.cancel(mona, 'CR-DRAFT', at.cancel);
 		expect(cancelled.status).toBe(CrStatus.CANCELLED);
-		expect(cancelled.audit).toEqual([{ action: CrAction.CANCEL, byUserId: 'alice', at: at.cancel }]);
+		expect(cancelled.audit).toEqual([{ action: CrAction.CANCEL, byUserId: 'mona', at: at.cancel }]);
 
 		const attempts: Array<{ run: () => void; code: BusinessError['code'] }> = [
-			{ run: () => service.submit(alice, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
-			{ run: () => service.sendForApproval(alice, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
-			{ run: () => service.approve(alice, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
-			{ run: () => service.returnToDraft(alice, 'CR-DRAFT', at.later), code: 'VALIDATION' },
-			{ run: () => service.reject(alice, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
-			{ run: () => service.apply(alice, 'CR-DRAFT', at.later), code: 'VALIDATION' },
+			{ run: () => service.submit(mona, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
+			{ run: () => service.sendForApproval(mona, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
+			{ run: () => service.approve(mona, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
+			{ run: () => service.returnToDraft(mona, 'CR-DRAFT', at.later), code: 'VALIDATION' },
+			{ run: () => service.reject(mona, 'CR-DRAFT', at.later), code: 'TERMINAL_STATE' },
+			{ run: () => service.apply(mona, 'CR-DRAFT', at.later), code: 'VALIDATION' },
 		];
 
 		for (const attempt of attempts) {
 			expectBusinessError(attempt.run, attempt.code);
 		}
 
-		const after = service.get(alice, 'CR-DRAFT');
+		const after = service.get(mona, 'CR-DRAFT');
 		expect(after.status).toBe(CrStatus.CANCELLED);
-		expect(after.audit).toEqual([{ action: CrAction.CANCEL, byUserId: 'alice', at: at.cancel }]);
+		expect(after.audit).toEqual([{ action: CrAction.CANCEL, byUserId: 'mona', at: at.cancel }]);
+	});
+
+	it('checks approve permission before cancel, then leaves the cancelled request unchanged', () => {
+		const service = freshService();
+		const { alice, mona } = buildSeed().users;
+
+		expectBusinessError(() => service.cancel(alice, 'CR-DRAFT', at.cancel), 'FORBIDDEN');
+		expect(service.get(alice, 'CR-DRAFT').status).toBe(CrStatus.DRAFT);
+		expect(service.get(alice, 'CR-DRAFT').audit).toEqual([]);
+
+		const cancelled = service.cancel(mona, 'CR-DRAFT', at.cancel);
+		expect(cancelled.status).toBe(CrStatus.CANCELLED);
+		expectBusinessError(() => service.returnToDraft(mona, 'CR-DRAFT', at.later), 'VALIDATION');
+		expect(service.get(mona, 'CR-DRAFT').status).toBe(CrStatus.CANCELLED);
+		expect(service.get(mona, 'CR-DRAFT').audit).toEqual([{ action: CrAction.CANCEL, byUserId: 'mona', at: at.cancel }]);
 	});
 
 	it('does not cancel a returned, applied, or committee-decision change request', () => {
@@ -82,7 +98,7 @@ describe('CR cancel flow (no permission checks)', () => {
 		};
 
 		const service = freshService([returned, committeeDecision]);
-		const { alice } = seed.users;
+		const { alice, mona } = seed.users;
 		const blocked = [
 			{ id: 'CR-RETURNED', status: CrStatus.RETURNED, code: 'ILLEGAL_TRANSITION' as const },
 			{ id: 'CR-APPLIED', status: CrStatus.APPLIED, code: 'TERMINAL_STATE' as const },
@@ -94,7 +110,7 @@ describe('CR cancel flow (no permission checks)', () => {
 			expect(before.status).toBe(item.status);
 			const audit = [...before.audit];
 
-			expectBusinessError(() => service.cancel(alice, item.id, at.cancel), item.code);
+			expectBusinessError(() => service.cancel(mona, item.id, at.cancel), item.code);
 
 			const after = service.get(alice, item.id);
 			expect(after.status).toBe(item.status);
