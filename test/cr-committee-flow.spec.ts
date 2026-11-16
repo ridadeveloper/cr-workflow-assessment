@@ -1,7 +1,8 @@
 import { CrService } from '../src/change-requests/cr-service';
 import { CrRepo } from '../src/change-requests/cr-repo';
 import { CrAction, CrStatus } from '../src/change-requests/cr.enums';
-import { ChangeRequest, COMMITTEE_DELTA_THRESHOLD } from '../src/change-requests/cr.types';
+import { Budget, ChangeRequest, COMMITTEE_DELTA_THRESHOLD } from '../src/change-requests/cr.types';
+import { BusinessError } from '../src/common/errors';
 import { buildSeed } from '../src/seed';
 
 /**
@@ -71,5 +72,119 @@ describe('CR committee flow when both members accept', () => {
 			{ action: CrAction.RESOLVE_COMMITTEE, byUserId: 'dina', at: at.dina },
 			{ action: CrAction.RESOLVE_COMMITTEE, byUserId: 'dina', at: at.dina },
 		]);
+	});
+});
+
+/**
+ * Same committee and the same large draft. These are the ways the vote ends without approving,
+ * plus a member trying to vote twice.
+ */
+describe('CR committee flow when the vote does not approve', () => {
+	const at = {
+		submit: '2026-03-04T09:00:00.000Z',
+		send: '2026-03-04T10:00:00.000Z',
+		carl: '2026-03-04T11:00:00.000Z',
+		dina: '2026-03-04T12:00:00.000Z',
+		again: '2026-03-04T13:00:00.000Z',
+	};
+
+	function freshService(): { service: CrService; budgets: Map<string, Budget> } {
+		const seed = buildSeed();
+		const large = seed.changeRequests.find((cr) => cr.id === 'CR-PENDING-LARGE');
+		if (!large) throw new Error('CR-PENDING-LARGE missing from seed');
+
+		const draft: ChangeRequest = {
+			...structuredClone(large),
+			id: 'CR-LARGE-DRAFT',
+			status: CrStatus.DRAFT,
+			totals: { baselineTotal: 0, newTotal: 0, delta: 0 },
+			approvals: [],
+			audit: [],
+		};
+		const repo = new CrRepo();
+		const budgets = structuredClone(seed.budgets);
+		repo.seed(structuredClone([...seed.changeRequests, draft]));
+		return {
+			service: new CrService(repo, structuredClone(seed.agreements), budgets, seed.committeeConfig),
+			budgets,
+		};
+	}
+
+	function expectBusinessError(run: () => void, code: BusinessError['code']): void {
+		try {
+			run();
+		} catch (err) {
+			expect(err).toBeInstanceOf(BusinessError);
+			expect((err as BusinessError).code).toBe(code);
+			return;
+		}
+		throw new Error(`expected a ${code} business error`);
+	}
+
+	function openVoting(service: CrService): void {
+		const { alice } = buildSeed().users;
+		service.submit(alice, 'CR-LARGE-DRAFT', at.submit);
+		const voting = service.sendForApproval(alice, 'CR-LARGE-DRAFT', at.send);
+		expect(voting.status).toBe(CrStatus.COMMITTEE_VOTING);
+		expect(voting.totals.delta).toBeGreaterThan(COMMITTEE_DELTA_THRESHOLD);
+	}
+
+	it('rejects when the head votes no', () => {
+		const { service, budgets } = freshService();
+		const { carl, dina } = buildSeed().users;
+		openVoting(service);
+
+		const afterCarl = service.castVote(carl, 'CR-LARGE-DRAFT', 'APPROVE', at.carl);
+		expect(afterCarl.status).toBe(CrStatus.COMMITTEE_VOTING);
+
+		const rejected = service.castVote(dina, 'CR-LARGE-DRAFT', 'REJECT', at.dina);
+		expect(rejected.status).toBe(CrStatus.REJECTED);
+		expect(rejected.committee?.resolvedAt).toBe(at.dina);
+		expect(rejected.committee?.votes).toEqual([
+			{ userId: 'carl', decision: 'APPROVE', at: at.carl },
+			{ userId: 'dina', decision: 'REJECT', at: at.dina },
+		]);
+		expect(rejected.audit.map((entry) => entry.action)).toEqual([
+			CrAction.SUBMIT,
+			CrAction.SEND_FOR_APPROVAL,
+			CrAction.SEND_FOR_APPROVAL,
+			CrAction.CAST_VOTE,
+			CrAction.CAST_VOTE,
+			CrAction.RESOLVE_COMMITTEE,
+			CrAction.RESOLVE_COMMITTEE,
+		]);
+		expect(budgets.get('BUD-1')).toMatchObject({ booked: 8000, balance: 10000 });
+	});
+
+	it('rejects when everyone has voted and there is no majority', () => {
+		const { service, budgets } = freshService();
+		const { carl, dina } = buildSeed().users;
+		openVoting(service);
+
+		const afterCarl = service.castVote(carl, 'CR-LARGE-DRAFT', 'REJECT', at.carl);
+		expect(afterCarl.status).toBe(CrStatus.COMMITTEE_VOTING);
+
+		const rejected = service.castVote(dina, 'CR-LARGE-DRAFT', 'APPROVE', at.dina);
+		expect(rejected.status).toBe(CrStatus.REJECTED);
+		expect(rejected.committee?.resolvedAt).toBe(at.dina);
+		expect(rejected.committee?.votes).toEqual([
+			{ userId: 'carl', decision: 'REJECT', at: at.carl },
+			{ userId: 'dina', decision: 'APPROVE', at: at.dina },
+		]);
+		expect(budgets.get('BUD-1')).toMatchObject({ booked: 8000, balance: 10000 });
+	});
+
+	it('refuses a second vote from the same member and leaves the first vote in place', () => {
+		const { service } = freshService();
+		const { carl } = buildSeed().users;
+		openVoting(service);
+
+		service.castVote(carl, 'CR-LARGE-DRAFT', 'APPROVE', at.carl);
+		expectBusinessError(() => service.castVote(carl, 'CR-LARGE-DRAFT', 'REJECT', at.again), 'VALIDATION');
+
+		const cr = service.get(buildSeed().users.alice, 'CR-LARGE-DRAFT');
+		expect(cr.status).toBe(CrStatus.COMMITTEE_VOTING);
+		expect(cr.committee?.votes).toEqual([{ userId: 'carl', decision: 'APPROVE', at: at.carl }]);
+		expect(cr.committee?.resolvedAt).toBeUndefined();
 	});
 });
